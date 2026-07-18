@@ -1,0 +1,16 @@
+{
+  "name": "denova-bot",
+  "version": "1.0.0",
+  "description": "Denova Dental Clinic - WhatsApp list menu + Meta (Messenger/Instagram) AI auto-reply bot",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
