@@ -108,7 +108,7 @@ async function handleMetaMessage(event) {
 
   if (wantsHuman(text)) {
     escalate(platform, senderId);
-    await sendMetaText(senderId, "تمام، هيتواصل معاك حد من فريق العيادة في أقرب وقت. شكرًا لصبرك 🙏");
+    await sendMetaText(platform, senderId, "تمام، هيتواصل معاك حد من فريق العيادة في أقرب وقت. شكرًا لصبرك 🙏");
     await logLeadSafely({
       source: platform === "instagram" ? "انستجرام" : "ماسنجر",
       status: "عميل جديد",
@@ -120,7 +120,7 @@ async function handleMetaMessage(event) {
   pushHistory(platform, senderId, "user", text);
   const reply = await getAiReply(text, convo.history.slice(0, -1));
   pushHistory(platform, senderId, "assistant", reply);
-  await sendMetaText(senderId, reply);
+  await sendMetaText(platform, senderId, reply);
 
   if (isFirstContact) {
     await logLeadSafely({
