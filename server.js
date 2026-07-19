@@ -36,8 +36,10 @@ function looksLikeBookingDetails(text = "") {
 }
 
 async function logLeadSafely(lead) {
+  console.log("Attempting to log lead to Google Sheet:", JSON.stringify(lead));
   try {
     await appendLead(lead);
+    console.log("Successfully logged lead to Google Sheet.");
   } catch (err) {
     // Never let a logging failure break the customer-facing reply.
     console.error("Failed to log lead to Google Sheet:", err.message);
