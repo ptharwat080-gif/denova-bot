@@ -50,6 +50,13 @@ function isArabicText(text = "") {
   return /[؀-ۿ]/.test(text);
 }
 
+// Normalizes a phone number for comparison (strips spaces, dashes, parens, +) so we can tell
+// whether a number mentioned mid-booking is genuinely different from the number the customer
+// is messaging from, rather than just formatted differently.
+function normalizePhone(value = "") {
+  return String(value).replace(/[^\d]/g, "");
+}
+
 // Heuristic: a message that contains a run of 10+ digits is very likely someone
 // sharing a phone number as part of booking details (name + number + date/time).
 function looksLikeBookingDetails(text = "") {
@@ -201,6 +208,7 @@ async function handleMetaMessage(event) {
           appointmentDate: details.date,
           appointmentTime: details.time,
           status: "تم الحجز",
+          otherTopics: details.otherTopics || "",
           notes: "تفاصيل حجز تم استخراجها تلقائيًا من المحادثة.",
         });
       } else {
@@ -318,14 +326,18 @@ async function handleWhatsAppEvent(event) {
     const transcript = `Customer phone number: ${from}\nCustomer message: ${text}`;
     const details = await extractBookingDetails(transcript);
     if (details) {
+      const altPhone =
+        details.phone && normalizePhone(details.phone) !== normalizePhone(from) ? details.phone : "";
       await logLeadSafely(convo, {
         name: details.name,
-        phone: details.phone || from,
+        phone: from, // always keep the real WhatsApp contact number in this column
+        altPhone,
         source: "واتساب",
         packageInterest: details.service,
         appointmentDate: details.date,
         appointmentTime: details.time,
         status: "تم الحجز",
+        otherTopics: details.otherTopics || "",
         notes: "تفاصيل حجز تم استخراجها تلقائيًا من المحادثة.",
       });
     } else {
@@ -367,14 +379,18 @@ async function handleWhatsAppEvent(event) {
     if (looksLikeBookingDetails(transcript)) {
       const details = await extractBookingDetails(transcript);
       if (details) {
+        const altPhone =
+          details.phone && normalizePhone(details.phone) !== normalizePhone(from) ? details.phone : "";
         await logLeadSafely(convo, {
           name: details.name,
-          phone: details.phone || from,
+          phone: from, // always keep the real WhatsApp contact number in this column
+          altPhone,
           source: "واتساب",
           packageInterest: details.service,
           appointmentDate: details.date,
           appointmentTime: details.time,
           status: "تم الحجز",
+          otherTopics: details.otherTopics || "",
           notes: "تفاصيل حجز تم استخراجها تلقائيًا من المحادثة.",
         });
       }
