@@ -158,6 +158,17 @@ async function handleMetaMessage(event) {
     return;
   }
 
+  // Log the contact immediately, before doing anything that could fail (AI call, send call).
+  // This way, even if something breaks downstream, we still have a record that this person
+  // reached out - never lose a lead just because a later step errored.
+  if (!convo.sheetRow) {
+    await logLeadSafely(convo, {
+      source: platform === "instagram" ? "انستجرام" : "ماسنجر",
+      status: "عميل جديد",
+      notes: `أول رسالة: ${text}`,
+    });
+  }
+
   if (wantsHuman(text)) {
     escalate(platform, senderId);
     await sendMetaText(platform, senderId, "تمام، هيتواصل معاك حد من فريق العيادة في أقرب وقت. شكرًا لصبرك 🙏");
@@ -174,13 +185,7 @@ async function handleMetaMessage(event) {
   pushHistory(platform, senderId, "assistant", reply);
   await sendMetaText(platform, senderId, reply);
 
-  if (isFirstContact) {
-    await logLeadSafely(convo, {
-      source: platform === "instagram" ? "انستجرام" : "ماسنجر",
-      status: "عميل جديد",
-      notes: `أول رسالة: ${text}`,
-    });
-  } else if (looksLikeBookingDetails(text)) {
+  if (!isFirstContact && looksLikeBookingDetails(text)) {
     // Likely the customer just sent name + phone + preferred date/time in free chat.
     // Try to pull structured fields out of the conversation so the sheet gets real columns,
     // not just a notes blob.
@@ -249,6 +254,13 @@ async function handleWhatsAppEvent(event) {
   const lang = convo.lang || "ar";
   const menu = lang === "en" ? WHATSAPP_MAIN_MENU_EN : WHATSAPP_MAIN_MENU;
   const replies = lang === "en" ? MENU_REPLIES_EN : MENU_REPLIES;
+
+  // Log the phone number immediately on first contact, before anything that could fail
+  // (AI call, WhatsApp send call). This way we always have a way to reach this person back,
+  // even if a later step in this same message errors out.
+  if (!convo.sheetRow && from) {
+    await logLeadSafely(convo, { phone: from, source: "واتساب", status: "عميل جديد", notes: `أول رسالة: ${text || ""}` });
+  }
 
   // 1) Explicit human handoff, any time.
   if (type === "text" && wantsHuman(text)) {
@@ -336,7 +348,6 @@ async function handleWhatsAppEvent(event) {
     pushHistory("whatsapp", from, "assistant", reply);
     await sendWhatsAppText(from, reply);
     await sendWhatsAppList(from, menu);
-    await logLeadSafely(convo, { phone: from, source: "واتساب", status: "عميل جديد", notes: `أول رسالة: ${text}` });
     return;
   }
 
