@@ -185,29 +185,30 @@ async function handleMetaMessage(event) {
   pushHistory(platform, senderId, "assistant", reply);
   await sendMetaText(platform, senderId, reply);
 
-  if (!isFirstContact && looksLikeBookingDetails(text)) {
-    // Likely the customer just sent name + phone + preferred date/time in free chat.
-    // Try to pull structured fields out of the conversation so the sheet gets real columns,
-    // not just a notes blob.
+  // Check the WHOLE conversation so far, not just this one message, for booking details -
+  // the AI often collects name/phone/service/date/time naturally across several messages,
+  // and we don't want to miss it just because the phone number appeared a few turns back.
+  if (!isFirstContact && (!convo.leadData || convo.leadData.status !== "تم الحجز")) {
     const transcript = convo.history.map((h) => `${h.role === "user" ? "Customer" : "Clinic"}: ${h.content}`).join("\n");
-    const details = await extractBookingDetails(transcript);
-    if (details) {
-      await logLeadSafely(convo, {
-        name: details.name,
-        phone: details.phone,
-        source: platform === "instagram" ? "انستجرام" : "ماسنجر",
-        packageInterest: details.service,
-        appointmentDate: details.date,
-        appointmentTime: details.time,
-        status: "تم الحجز",
-        notes: "تفاصيل حجز تم استخراجها تلقائيًا من المحادثة.",
-      });
-    } else {
-      await logLeadSafely(convo, {
-        source: platform === "instagram" ? "انستجرام" : "ماسنجر",
-        status: "تم الحجز",
-        notes: `تفاصيل حجز مرسلة من العميل: ${text}`,
-      });
+    if (looksLikeBookingDetails(transcript)) {
+      const details = await extractBookingDetails(transcript);
+      if (details) {
+        await logLeadSafely(convo, {
+          name: details.name,
+          phone: details.phone,
+          source: platform === "instagram" ? "انستجرام" : "ماسنجر",
+          packageInterest: details.service,
+          appointmentDate: details.date,
+          appointmentTime: details.time,
+          status: "تم الحجز",
+          notes: "تفاصيل حجز تم استخراجها تلقائيًا من المحادثة.",
+        });
+      } else {
+        await logLeadSafely(convo, {
+          source: platform === "instagram" ? "انستجرام" : "ماسنجر",
+          notes: `آخر رسالة: ${text}`,
+        });
+      }
     }
   }
 }
@@ -357,6 +358,28 @@ async function handleWhatsAppEvent(event) {
   pushHistory("whatsapp", from, "assistant", reply);
   await sendWhatsAppText(from, reply);
   console.log(`WhatsApp reply sent to ${from}.`);
+
+  // The AI often collects full booking details (name, service, date, time) naturally across
+  // several plain-chat messages, without the customer ever tapping the booking menu button.
+  // Check the WHOLE conversation so far after every reply so this still gets captured.
+  if (!convo.leadData || convo.leadData.status !== "تم الحجز") {
+    const transcript = convo.history.map((h) => `${h.role === "user" ? "Customer" : "Clinic"}: ${h.content}`).join("\n");
+    if (looksLikeBookingDetails(transcript)) {
+      const details = await extractBookingDetails(transcript);
+      if (details) {
+        await logLeadSafely(convo, {
+          name: details.name,
+          phone: details.phone || from,
+          source: "واتساب",
+          packageInterest: details.service,
+          appointmentDate: details.date,
+          appointmentTime: details.time,
+          status: "تم الحجز",
+          notes: "تفاصيل حجز تم استخراجها تلقائيًا من المحادثة.",
+        });
+      }
+    }
+  }
 }
 
 const PORT = process.env.PORT || 3000;
