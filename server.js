@@ -250,9 +250,15 @@ async function handleWhatsAppEvent(event) {
     return;
   }
 
-  // 4) First-ever contact -> send the interactive menu instead of free AI chat.
+  // 4) First-ever contact -> actually answer their message like a real receptionist would
+  // (same as Messenger/Instagram), then also send the quick-options menu as a follow-up so
+  // they know it's there if they'd rather tap through instead of typing.
   if (!convo.seenMenu) {
     convo.seenMenu = true;
+    pushHistory("whatsapp", from, "user", text);
+    const reply = await getAiReply(text, convo.history.slice(0, -1));
+    pushHistory("whatsapp", from, "assistant", reply);
+    await sendWhatsAppText(from, reply);
     await sendWhatsAppList(from, WHATSAPP_MAIN_MENU);
     await logLeadSafely({ name, phone: from, source: "واتساب", status: "عميل جديد", notes: `أول رسالة: ${text}` });
     return;
