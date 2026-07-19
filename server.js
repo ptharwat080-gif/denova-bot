@@ -345,7 +345,7 @@ async function handleWhatsAppEvent(event) {
   if (!convo.seenMenu) {
     convo.seenMenu = true;
     pushHistory("whatsapp", from, "user", text);
-    const reply = await getAiReply(text, convo.history.slice(0, -1));
+    const reply = await getAiReply(text, convo.history.slice(0, -1), convo.lang);
     pushHistory("whatsapp", from, "assistant", reply);
     await sendWhatsAppText(from, reply);
     await sendWhatsAppList(from, menu);
@@ -354,7 +354,7 @@ async function handleWhatsAppEvent(event) {
 
   // 5) Anything else -> fall back to the AI for a free-form, on-brand reply.
   pushHistory("whatsapp", from, "user", text);
-  const reply = await getAiReply(text, convo.history.slice(0, -1));
+  const reply = await getAiReply(text, convo.history.slice(0, -1), convo.lang);
   pushHistory("whatsapp", from, "assistant", reply);
   await sendWhatsAppText(from, reply);
   console.log(`WhatsApp reply sent to ${from}.`);
