@@ -341,11 +341,15 @@ async function handleWhatsAppEvent(event) {
         notes: "تفاصيل حجز تم استخراجها تلقائيًا من المحادثة.",
       });
     } else {
+      // Extraction failed because this first reply didn't contain all 5 details yet (e.g. the
+      // customer just said "I have pain" instead of giving name/date/time). Do NOT mark this as
+      // "تم الحجز" (booked) - that would stop us from ever re-checking the conversation later,
+      // even after the customer goes on to complete the booking naturally in later messages.
       await logLeadSafely(convo, {
         phone: from,
         source: "واتساب",
-        status: "تم الحجز",
-        notes: `تفاصيل الحجز كما أرسلها العميل: ${text}`,
+        status: "في انتظار تفاصيل الحجز",
+        notes: `آخر رسالة أثناء الحجز: ${text}`,
       });
     }
     return;
