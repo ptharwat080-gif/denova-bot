@@ -13,7 +13,7 @@ const express = require("express");
 const { getAiReply, extractBookingDetails } = require("./lib/claude");
 const { sendMetaText, parseMetaWebhookEvents, sendCommentReply, sendPrivateReply } = require("./lib/metaMessenger");
 const { sendWhatsAppText, sendWhatsAppList, parseWhatsAppWebhookEvents } = require("./lib/whatsapp");
-const { WHATSAPP_MAIN_MENU, MENU_REPLIES } = require("./lib/knowledge");
+const { WHATSAPP_MAIN_MENU, MENU_REPLIES, WHATSAPP_MAIN_MENU_EN, MENU_REPLIES_EN } = require("./lib/knowledge");
 const { getConversation, pushHistory, escalate } = require("./lib/state");
 const { appendLead } = require("./lib/sheets");
 
@@ -23,10 +23,31 @@ app.use(express.json());
 const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN;
 const WHATSAPP_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
 
-const ESCALATION_KEYWORDS = ["موظف", "حد يرد", "عايز اكلم حد", "حد بشري", "دكتور", "المسؤول"];
+const ESCALATION_KEYWORDS = [
+  "موظف",
+  "حد يرد",
+  "عايز اكلم حد",
+  "حد بشري",
+  "دكتور",
+  "المسؤول",
+  "human",
+  "agent",
+  "representative",
+  "real person",
+  "talk to someone",
+  "speak to someone",
+];
 
 function wantsHuman(text = "") {
-  return ESCALATION_KEYWORDS.some((kw) => text.includes(kw));
+  const lower = text.toLowerCase();
+  return ESCALATION_KEYWORDS.some((kw) => lower.includes(kw.toLowerCase()));
+}
+
+// Simple language detection: if the message contains any Arabic-script characters,
+// treat the conversation as Arabic; otherwise treat it as English. Used to pick the
+// right interactive-menu language and canned-reply language for WhatsApp.
+function isArabicText(text = "") {
+  return /[؀-ۿ]/.test(text);
 }
 
 // Heuristic: a message that contains a run of 10+ digits is very likely someone
@@ -191,10 +212,19 @@ async function handleWhatsAppEvent(event) {
 
   if (convo.escalated) return; // human has taken over
 
+  // Detect and remember the customer's language from the first real text they send, so every
+  // canned reply and menu after this matches it - not just the free-form AI replies.
+  if (type === "text" && text && !convo.lang) {
+    convo.lang = isArabicText(text) ? "ar" : "en";
+  }
+  const lang = convo.lang || "ar";
+  const menu = lang === "en" ? WHATSAPP_MAIN_MENU_EN : WHATSAPP_MAIN_MENU;
+  const replies = lang === "en" ? MENU_REPLIES_EN : MENU_REPLIES;
+
   // 1) Explicit human handoff, any time.
   if (type === "text" && wantsHuman(text)) {
     escalate("whatsapp", from);
-    await sendWhatsAppText(from, MENU_REPLIES.MENU_HUMAN);
+    await sendWhatsAppText(from, replies.MENU_HUMAN);
     await logLeadSafely({ name, phone: from, source: "واتساب", status: "عميل جديد", notes: "طلب التحدث مع موظف بشري" });
     return;
   }
@@ -203,10 +233,10 @@ async function handleWhatsAppEvent(event) {
   if (type === "list_reply") {
     if (listId === "MENU_BOOK") {
       convo.step = "awaiting_booking_details";
-      await sendWhatsAppText(from, "تمام! قولي اسمك الكريم والميعاد اللي يناسبك (اليوم والوقت) وهنأكد لك.");
+      await sendWhatsAppText(from, replies.BOOKING_START);
       return;
     }
-    const canned = MENU_REPLIES[listId];
+    const canned = replies[listId];
     if (canned) {
       await sendWhatsAppText(from, canned);
       await logLeadSafely({
@@ -216,6 +246,9 @@ async function handleWhatsAppEvent(event) {
         status: "عميل جديد",
         notes: `اختار من القايمة: ${text}`,
       });
+    } else {
+      // Unknown/unexpected list id - don't go silent, let them know how to continue.
+      await sendWhatsAppText(from, replies.UNRECOGNIZED_SELECTION);
     }
     return;
   }
@@ -223,7 +256,7 @@ async function handleWhatsAppEvent(event) {
   // 3) Free text while we're waiting for booking details.
   if (convo.step === "awaiting_booking_details") {
     convo.step = null;
-    await sendWhatsAppText(from, "تم استلام طلبك! هيتم تأكيد الميعاد من فريق العيادة قريب. شكرًا ليك 🙏");
+    await sendWhatsAppText(from, replies.BOOKING_RECEIVED);
 
     const transcript = `Customer phone number: ${from}\nCustomer message: ${text}`;
     const details = await extractBookingDetails(transcript);
@@ -259,7 +292,7 @@ async function handleWhatsAppEvent(event) {
     const reply = await getAiReply(text, convo.history.slice(0, -1));
     pushHistory("whatsapp", from, "assistant", reply);
     await sendWhatsAppText(from, reply);
-    await sendWhatsAppList(from, WHATSAPP_MAIN_MENU);
+    await sendWhatsAppList(from, menu);
     await logLeadSafely({ name, phone: from, source: "واتساب", status: "عميل جديد", notes: `أول رسالة: ${text}` });
     return;
   }
