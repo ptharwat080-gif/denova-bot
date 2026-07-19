@@ -80,6 +80,9 @@ async function getAccessToken() {
  * @param {string} [lead.appointmentTime]
  * @param {string} [lead.notes]
  */
+// Data rows start at row 5 (rows 1-4 are the title, subtitle, spacer, and header).
+const FIRST_DATA_ROW = 5;
+
 async function appendLead(lead) {
   if (!SHEET_ID) throw new Error("GOOGLE_SHEET_ID is not set");
 
@@ -100,11 +103,39 @@ async function appendLead(lead) {
     lead.notes || "",
   ];
 
-  const range = encodeURIComponent(`'${SHEET_TAB}'!A:K`);
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
+  // Figure out the next truly-empty row ourselves by checking column A directly, instead of
+  // relying on the Sheets API's "append after last table" auto-detection. That auto-detection
+  // gets thrown off by leftover formatting/data-validation on far-below empty rows (a common
+  // artifact of converting an .xlsx template to Google Sheets), causing new rows to land far
+  // past the real data instead of right after it. Reading column A fresh on every write also
+  // means manual edits/deletions in the sheet never desync the bot - it always finds the real
+  // next empty row at write time.
+  const colRange = encodeURIComponent(`'${SHEET_TAB}'!A${FIRST_DATA_ROW}:A`);
+  const getUrl = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${colRange}`;
+  const getRes = await fetch(getUrl, {
+    headers: { authorization: `Bearer ${accessToken}` },
+  });
+  if (!getRes.ok) {
+    throw new Error(`Sheets read error ${getRes.status}: ${await getRes.text()}`);
+  }
+  const getData = await getRes.json();
+  const columnValues = getData.values || [];
 
-  const res = await fetch(url, {
-    method: "POST",
+  let targetRow = FIRST_DATA_ROW;
+  for (let i = 0; i < columnValues.length; i++) {
+    const cellValue = columnValues[i] && columnValues[i][0] ? String(columnValues[i][0]).trim() : "";
+    if (cellValue === "") {
+      targetRow = FIRST_DATA_ROW + i;
+      break;
+    }
+    targetRow = FIRST_DATA_ROW + i + 1;
+  }
+
+  const writeRange = encodeURIComponent(`'${SHEET_TAB}'!A${targetRow}:K${targetRow}`);
+  const writeUrl = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${writeRange}?valueInputOption=USER_ENTERED`;
+
+  const res = await fetch(writeUrl, {
+    method: "PUT",
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${accessToken}`,
@@ -113,7 +144,7 @@ async function appendLead(lead) {
   });
 
   if (!res.ok) {
-    throw new Error(`Sheets append error ${res.status}: ${await res.text()}`);
+    throw new Error(`Sheets write error ${res.status}: ${await res.text()}`);
   }
 }
 
