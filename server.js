@@ -15,7 +15,7 @@ const { sendMetaText, parseMetaWebhookEvents, sendCommentReply, sendPrivateReply
 const { sendWhatsAppText, sendWhatsAppList, parseWhatsAppWebhookEvents } = require("./lib/whatsapp");
 const { WHATSAPP_MAIN_MENU, MENU_REPLIES, WHATSAPP_MAIN_MENU_EN, MENU_REPLIES_EN } = require("./lib/knowledge");
 const { getConversation, pushHistory, escalate } = require("./lib/state");
-const { appendLead } = require("./lib/sheets");
+const { appendLead, updateLeadRow } = require("./lib/sheets");
 
 const app = express();
 app.use(express.json());
@@ -56,10 +56,38 @@ function looksLikeBookingDetails(text = "") {
   return /\d{10,}/.test(text.replace(/[\s\-()]/g, ""));
 }
 
-async function logLeadSafely(lead) {
-  console.log("Attempting to log lead to Google Sheet:", JSON.stringify(lead));
+// Bare-number replies mapped to opening-day packages, used right after we show the
+// numbered offer list so a customer can just reply "1"/"2"/"3" (Arabic-Indic digits too).
+const PACKAGE_BY_NUMBER = {
+  "1": "Essential Clean",
+  "2": "Complete Care",
+  "3": "Bright Smile",
+  "١": "Essential Clean",
+  "٢": "Complete Care",
+  "٣": "Bright Smile",
+};
+
+/**
+ * Logs a lead against a conversation, keeping ONE row per conversation instead of a new row
+ * per touchpoint. The first call appends a row and remembers its number on `convo.sheetRow`;
+ * every later call for the same `convo` overwrites that same row, merging in only the fields
+ * this call provides on top of whatever was already known (so a later call doesn't need to
+ * repeat name/phone/source just to update, say, the package the customer picked).
+ *
+ * @param {object} convo - the conversation object from lib/state (or any object for one-off,
+ *   non-conversational logs like public comments, which will always append a fresh row).
+ * @param {object} lead - the fields to set/update.
+ */
+async function logLeadSafely(convo, lead) {
+  const merged = { ...(convo.leadData || {}), ...lead };
+  console.log("Logging lead to Google Sheet:", JSON.stringify(merged));
   try {
-    await appendLead(lead);
+    if (convo.sheetRow) {
+      await updateLeadRow(convo.sheetRow, merged);
+    } else {
+      convo.sheetRow = await appendLead(merged);
+    }
+    convo.leadData = merged;
     console.log("Successfully logged lead to Google Sheet.");
   } catch (err) {
     // Never let a logging failure break the customer-facing reply.
@@ -110,13 +138,14 @@ async function handleMetaComment(event) {
     "أهلاً بيك في Denova Dental Clinic! يسعدنا اهتمامك. تحب تعرف تفاصيل عروض الافتتاح، ولا تحجز كشف على طول؟"
   ).catch((e) => console.error(e.message));
 
-  await logLeadSafely({
-    name: "",
-    phone: "",
-    source: "تعليق ميتا",
-    status: "عميل جديد",
-    notes: `تعليق: ${event.text || ""}`,
-  });
+  await logLeadSafely(
+    {},
+    {
+      source: "تعليق ميتا",
+      status: "عميل جديد",
+      notes: `تعليق: ${event.text || ""}`,
+    }
+  );
 }
 
 async function handleMetaMessage(event) {
@@ -132,7 +161,7 @@ async function handleMetaMessage(event) {
   if (wantsHuman(text)) {
     escalate(platform, senderId);
     await sendMetaText(platform, senderId, "تمام، هيتواصل معاك حد من فريق العيادة في أقرب وقت. شكرًا لصبرك 🙏");
-    await logLeadSafely({
+    await logLeadSafely(convo, {
       source: platform === "instagram" ? "انستجرام" : "ماسنجر",
       status: "عميل جديد",
       notes: "طلب التحدث مع موظف بشري",
@@ -146,7 +175,7 @@ async function handleMetaMessage(event) {
   await sendMetaText(platform, senderId, reply);
 
   if (isFirstContact) {
-    await logLeadSafely({
+    await logLeadSafely(convo, {
       source: platform === "instagram" ? "انستجرام" : "ماسنجر",
       status: "عميل جديد",
       notes: `أول رسالة: ${text}`,
@@ -158,7 +187,7 @@ async function handleMetaMessage(event) {
     const transcript = convo.history.map((h) => `${h.role === "user" ? "Customer" : "Clinic"}: ${h.content}`).join("\n");
     const details = await extractBookingDetails(transcript);
     if (details) {
-      await logLeadSafely({
+      await logLeadSafely(convo, {
         name: details.name,
         phone: details.phone,
         source: platform === "instagram" ? "انستجرام" : "ماسنجر",
@@ -169,7 +198,7 @@ async function handleMetaMessage(event) {
         notes: "تفاصيل حجز تم استخراجها تلقائيًا من المحادثة.",
       });
     } else {
-      await logLeadSafely({
+      await logLeadSafely(convo, {
         source: platform === "instagram" ? "انستجرام" : "ماسنجر",
         status: "تم الحجز",
         notes: `تفاصيل حجز مرسلة من العميل: ${text}`,
@@ -225,8 +254,21 @@ async function handleWhatsAppEvent(event) {
   if (type === "text" && wantsHuman(text)) {
     escalate("whatsapp", from);
     await sendWhatsAppText(from, replies.MENU_HUMAN);
-    await logLeadSafely({ name, phone: from, source: "واتساب", status: "عميل جديد", notes: "طلب التحدث مع موظف بشري" });
+    await logLeadSafely(convo, { phone: from, source: "واتساب", status: "عميل جديد", notes: "طلب التحدث مع موظف بشري" });
     return;
+  }
+
+  // 1.5) Customer replying with just a package number after we showed the numbered offers.
+  if (type === "text" && convo.awaitingPackageChoice) {
+    convo.awaitingPackageChoice = false;
+    const packageName = PACKAGE_BY_NUMBER[text.trim()];
+    if (packageName) {
+      convo.step = "awaiting_booking_details";
+      await logLeadSafely(convo, { phone: from, source: "واتساب", packageInterest: packageName, status: "مهتم بباقة" });
+      await sendWhatsAppText(from, replies.BOOKING_START);
+      return;
+    }
+    // Not a bare number reply - fall through to normal handling below.
   }
 
   // 2) List selection.
@@ -239,8 +281,10 @@ async function handleWhatsAppEvent(event) {
     const canned = replies[listId];
     if (canned) {
       await sendWhatsAppText(from, canned);
-      await logLeadSafely({
-        name,
+      if (listId === "MENU_OFFER") {
+        convo.awaitingPackageChoice = true;
+      }
+      await logLeadSafely(convo, {
         phone: from,
         source: "واتساب",
         status: "عميل جديد",
@@ -261,7 +305,7 @@ async function handleWhatsAppEvent(event) {
     const transcript = `Customer phone number: ${from}\nCustomer message: ${text}`;
     const details = await extractBookingDetails(transcript);
     if (details) {
-      await logLeadSafely({
+      await logLeadSafely(convo, {
         name: details.name,
         phone: details.phone || from,
         source: "واتساب",
@@ -272,8 +316,7 @@ async function handleWhatsAppEvent(event) {
         notes: "تفاصيل حجز تم استخراجها تلقائيًا من المحادثة.",
       });
     } else {
-      await logLeadSafely({
-        name,
+      await logLeadSafely(convo, {
         phone: from,
         source: "واتساب",
         status: "تم الحجز",
@@ -293,7 +336,7 @@ async function handleWhatsAppEvent(event) {
     pushHistory("whatsapp", from, "assistant", reply);
     await sendWhatsAppText(from, reply);
     await sendWhatsAppList(from, menu);
-    await logLeadSafely({ name, phone: from, source: "واتساب", status: "عميل جديد", notes: `أول رسالة: ${text}` });
+    await logLeadSafely(convo, { phone: from, source: "واتساب", status: "عميل جديد", notes: `أول رسالة: ${text}` });
     return;
   }
 
