@@ -86,7 +86,15 @@ const PACKAGE_BY_NUMBER = {
  * @param {object} lead - the fields to set/update.
  */
 async function logLeadSafely(convo, lead) {
-  const merged = { ...(convo.leadData || {}), ...lead };
+  // Always attach the latest full transcript, built fresh from convo.history (already kept in
+  // memory for the AI's own context) - no extra API call, no extra cost, just re-serializing
+  // text we already have, so the clinic can read any conversation directly from the sheet.
+  const transcript =
+    convo.history && convo.history.length
+      ? convo.history.map((h) => `${h.role === "user" ? "العميل" : "العيادة"}: ${h.content}`).join("\n")
+      : undefined;
+
+  const merged = { ...(convo.leadData || {}), ...lead, ...(transcript ? { transcript } : {}) };
   console.log("Logging lead to Google Sheet:", JSON.stringify(merged));
   try {
     if (convo.sheetRow) {
