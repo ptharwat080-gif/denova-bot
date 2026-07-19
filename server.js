@@ -171,8 +171,10 @@ app.get("/webhook/whatsapp", (req, res) => {
 
 app.post("/webhook/whatsapp", async (req, res) => {
   res.sendStatus(200);
+  console.log("WhatsApp webhook raw payload:", JSON.stringify(req.body));
   try {
     const events = parseWhatsAppWebhookEvents(req.body);
+    console.log(`WhatsApp webhook parsed ${events.length} event(s).`);
     for (const event of events) {
       await handleWhatsAppEvent(event);
     }
@@ -259,6 +261,7 @@ async function handleWhatsAppEvent(event) {
   const reply = await getAiReply(text, convo.history.slice(0, -1));
   pushHistory("whatsapp", from, "assistant", reply);
   await sendWhatsAppText(from, reply);
+  console.log(`WhatsApp reply sent to ${from}.`);
 }
 
 const PORT = process.env.PORT || 3000;
