@@ -10,7 +10,7 @@
 require("dotenv").config();
 const express = require("express");
 
-const { getAiReply } = require("./lib/claude");
+const { getAiReply, extractBookingDetails } = require("./lib/claude");
 const { sendMetaText, parseMetaWebhookEvents, sendCommentReply, sendPrivateReply } = require("./lib/metaMessenger");
 const { sendWhatsAppText, sendWhatsAppList, parseWhatsAppWebhookEvents } = require("./lib/whatsapp");
 const { WHATSAPP_MAIN_MENU, MENU_REPLIES } = require("./lib/knowledge");
@@ -27,6 +27,12 @@ const ESCALATION_KEYWORDS = ["موظف", "حد يرد", "عايز اكلم حد"
 
 function wantsHuman(text = "") {
   return ESCALATION_KEYWORDS.some((kw) => text.includes(kw));
+}
+
+// Heuristic: a message that contains a run of 10+ digits is very likely someone
+// sharing a phone number as part of booking details (name + number + date/time).
+function looksLikeBookingDetails(text = "") {
+  return /\d{10,}/.test(text.replace(/[\s\-()]/g, ""));
 }
 
 async function logLeadSafely(lead) {
@@ -122,6 +128,30 @@ async function handleMetaMessage(event) {
       status: "عميل جديد",
       notes: `أول رسالة: ${text}`,
     });
+  } else if (looksLikeBookingDetails(text)) {
+    // Likely the customer just sent name + phone + preferred date/time in free chat.
+    // Try to pull structured fields out of the conversation so the sheet gets real columns,
+    // not just a notes blob.
+    const transcript = convo.history.map((h) => `${h.role === "user" ? "Customer" : "Clinic"}: ${h.content}`).join("\n");
+    const details = await extractBookingDetails(transcript);
+    if (details) {
+      await logLeadSafely({
+        name: details.name,
+        phone: details.phone,
+        source: platform === "instagram" ? "انستجرام" : "ماسنجر",
+        packageInterest: details.service,
+        appointmentDate: details.date,
+        appointmentTime: details.time,
+        status: "تم الحجز",
+        notes: "تفاصيل حجز تم استخراجها تلقائيًا من المحادثة.",
+      });
+    } else {
+      await logLeadSafely({
+        source: platform === "instagram" ? "انستجرام" : "ماسنجر",
+        status: "تم الحجز",
+        notes: `تفاصيل حجز مرسلة من العميل: ${text}`,
+      });
+    }
   }
 }
 
@@ -190,13 +220,29 @@ async function handleWhatsAppEvent(event) {
   if (convo.step === "awaiting_booking_details") {
     convo.step = null;
     await sendWhatsAppText(from, "تم استلام طلبك! هيتم تأكيد الميعاد من فريق العيادة قريب. شكرًا ليك 🙏");
-    await logLeadSafely({
-      name,
-      phone: from,
-      source: "واتساب",
-      status: "تم الحجز",
-      notes: `تفاصيل الحجز كما أرسلها العميل: ${text}`,
-    });
+
+    const transcript = `Customer phone number: ${from}\nCustomer message: ${text}`;
+    const details = await extractBookingDetails(transcript);
+    if (details) {
+      await logLeadSafely({
+        name: details.name,
+        phone: details.phone || from,
+        source: "واتساب",
+        packageInterest: details.service,
+        appointmentDate: details.date,
+        appointmentTime: details.time,
+        status: "تم الحجز",
+        notes: "تفاصيل حجز تم استخراجها تلقائيًا من المحادثة.",
+      });
+    } else {
+      await logLeadSafely({
+        name,
+        phone: from,
+        source: "واتساب",
+        status: "تم الحجز",
+        notes: `تفاصيل الحجز كما أرسلها العميل: ${text}`,
+      });
+    }
     return;
   }
 
