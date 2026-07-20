@@ -12,7 +12,7 @@ const express = require("express");
 
 const { getAiReply, extractBookingDetails } = require("./lib/claude");
 const { sendMetaText, parseMetaWebhookEvents, sendCommentReply, sendPrivateReply } = require("./lib/metaMessenger");
-const { sendWhatsAppText, sendWhatsAppList, parseWhatsAppWebhookEvents } = require("./lib/whatsapp");
+const { sendWhatsAppText, sendWhatsAppList, sendWhatsAppTemplate, parseWhatsAppWebhookEvents } = require("./lib/whatsapp");
 const { WHATSAPP_MAIN_MENU, MENU_REPLIES, WHATSAPP_MAIN_MENU_EN, MENU_REPLIES_EN } = require("./lib/knowledge");
 const { getConversation, pushHistory, escalate } = require("./lib/state");
 const { appendLead, updateLeadRow } = require("./lib/sheets");
@@ -22,6 +22,11 @@ app.use(express.json());
 
 const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN;
 const WHATSAPP_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
+
+// The clinic's own WhatsApp number (doctor/reception) - digits only, country code, no + or spaces
+// (e.g. "201104677046"). When a customer asks for a human on ANY platform, we proactively alert
+// this number on WhatsApp with a summary, so the team can pick up the conversation with context.
+const CLINIC_STAFF_WHATSAPP_NUMBER = process.env.CLINIC_STAFF_WHATSAPP_NUMBER;
 
 const ESCALATION_KEYWORDS = [
   "موظف",
@@ -61,6 +66,42 @@ function normalizePhone(value = "") {
 // sharing a phone number as part of booking details (name + number + date/time).
 function looksLikeBookingDetails(text = "") {
   return /\d{10,}/.test(text.replace(/[\s\-()]/g, ""));
+}
+
+// WhatsApp template parameter values can't contain newlines/tabs or long runs of spaces -
+// collapse all whitespace to single spaces and cap the length as a safety margin.
+function sanitizeForTemplate(value = "") {
+  return String(value).replace(/\s+/g, " ").trim().slice(0, 1000);
+}
+
+// Builds a compact, single-line handoff summary from whatever we already know about this
+// conversation, so clinic staff can pick it up with context instead of starting from zero.
+function buildHandoffSummary(convo, text) {
+  const lead = convo.leadData || {};
+  const parts = [];
+  if (lead.name) parts.push(`الاسم: ${lead.name}`);
+  if (lead.packageInterest) parts.push(`مهتم بـ: ${lead.packageInterest}`);
+  if (lead.appointmentDate) parts.push(`تاريخ مطلوب: ${lead.appointmentDate}`);
+  if (lead.appointmentTime) parts.push(`الوقت: ${lead.appointmentTime}`);
+  if (lead.otherTopics) parts.push(`مواضيع تانية: ${lead.otherTopics}`);
+  parts.push(`آخر رسالة من العميل: ${text || ""}`);
+  return sanitizeForTemplate(parts.join(" | "));
+}
+
+// Proactively pings the clinic's own WhatsApp number using an approved message template (so it
+// works instantly regardless of the normal 24-hour customer-service-window rule). Never throws -
+// a failed staff notification should never break the customer-facing escalation reply.
+async function notifyClinicStaff(customerContact, summary) {
+  if (!CLINIC_STAFF_WHATSAPP_NUMBER) return;
+  try {
+    await sendWhatsAppTemplate(CLINIC_STAFF_WHATSAPP_NUMBER, "escalation_alert", "ar", [
+      sanitizeForTemplate(customerContact || "غير معروف"),
+      summary,
+    ]);
+    console.log("Notified clinic staff WhatsApp about an escalation.");
+  } catch (err) {
+    console.error("Failed to notify clinic staff WhatsApp:", err.message);
+  }
 }
 
 // Bare-number replies mapped to opening-day packages, used right after we show the
@@ -192,6 +233,8 @@ async function handleMetaMessage(event) {
       status: "عميل جديد",
       notes: "طلب التحدث مع موظف بشري",
     });
+    const contact = (convo.leadData && convo.leadData.phone) || `${platform === "instagram" ? "انستجرام" : "ماسنجر"} (${senderId})`;
+    await notifyClinicStaff(contact, buildHandoffSummary(convo, text));
     return;
   }
 
@@ -284,6 +327,7 @@ async function handleWhatsAppEvent(event) {
     escalate("whatsapp", from);
     await sendWhatsAppText(from, replies.MENU_HUMAN);
     await logLeadSafely(convo, { phone: from, source: "واتساب", status: "عميل جديد", notes: "طلب التحدث مع موظف بشري" });
+    await notifyClinicStaff(from, buildHandoffSummary(convo, text));
     return;
   }
 
