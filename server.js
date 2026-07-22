@@ -28,6 +28,20 @@ const WHATSAPP_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
 // this number on WhatsApp with a summary, so the team can pick up the conversation with context.
 const CLINIC_STAFF_WHATSAPP_NUMBER = process.env.CLINIC_STAFF_WHATSAPP_NUMBER;
 
+// Optional second WhatsApp number (e.g. the clinic's old general-contact number) registered
+// under the same WhatsApp Business Account as the primary bot number. If set, both numbers are
+// handled identically by the bot; replies always go out from whichever number received the
+// incoming message (see phoneNumberId on each parsed event).
+const WHATSAPP_PHONE_NUMBER_ID_2 = process.env.WHATSAPP_PHONE_NUMBER_ID_2;
+
+// Labels the sheet's "source" column so leads from the two numbers are distinguishable.
+function whatsappSourceLabel(phoneNumberId) {
+  if (WHATSAPP_PHONE_NUMBER_ID_2 && phoneNumberId === WHATSAPP_PHONE_NUMBER_ID_2) {
+    return "واتساب (الرقم القديم)";
+  }
+  return "واتساب";
+}
+
 const ESCALATION_KEYWORDS = [
   "موظف",
   "حد يرد",
@@ -240,8 +254,14 @@ async function handleMetaMessage(event) {
     return;
   }
 
+  // Same language-lock as WhatsApp: detect once from the first message and stick to it, so a
+  // short/ambiguous later reply (e.g. just a number) doesn't cause the AI to drift back to Arabic.
+  if (text && !convo.lang) {
+    convo.lang = isArabicText(text) ? "ar" : "en";
+  }
+
   pushHistory(platform, senderId, "user", text);
-  const reply = await getAiReply(text, convo.history.slice(0, -1));
+  const reply = await getAiReply(text, convo.history.slice(0, -1), convo.lang);
   pushHistory(platform, senderId, "assistant", reply);
   await sendMetaText(platform, senderId, reply);
 
@@ -303,8 +323,9 @@ app.post("/webhook/whatsapp", async (req, res) => {
 });
 
 async function handleWhatsAppEvent(event) {
-  const { from, type, text, listId, name } = event;
+  const { from, type, text, listId, name, phoneNumberId } = event;
   const convo = getConversation("whatsapp", from);
+  const source = whatsappSourceLabel(phoneNumberId);
 
   if (convo.escalated) return; // human has taken over
 
@@ -321,14 +342,14 @@ async function handleWhatsAppEvent(event) {
   // (AI call, WhatsApp send call). This way we always have a way to reach this person back,
   // even if a later step in this same message errors out.
   if (!convo.sheetRow && from) {
-    await logLeadSafely(convo, { phone: from, source: "واتساب", status: "عميل جديد", notes: `أول رسالة: ${text || ""}` });
+    await logLeadSafely(convo, { phone: from, source, status: "عميل جديد", notes: `أول رسالة: ${text || ""}` });
   }
 
   // 1) Explicit human handoff, any time.
   if (type === "text" && wantsHuman(text)) {
     escalate("whatsapp", from);
-    await sendWhatsAppText(from, replies.MENU_HUMAN);
-    await logLeadSafely(convo, { phone: from, source: "واتساب", status: "عميل جديد", notes: "طلب التحدث مع موظف بشري" });
+    await sendWhatsAppText(from, replies.MENU_HUMAN, phoneNumberId);
+    await logLeadSafely(convo, { phone: from, source, status: "عميل جديد", notes: "طلب التحدث مع موظف بشري" });
     await notifyClinicStaff(from, buildHandoffSummary(convo, text));
     return;
   }
@@ -339,8 +360,8 @@ async function handleWhatsAppEvent(event) {
     const packageName = PACKAGE_BY_NUMBER[text.trim()];
     if (packageName) {
       convo.step = "awaiting_booking_details";
-      await logLeadSafely(convo, { phone: from, source: "واتساب", packageInterest: packageName, status: "مهتم بباقة" });
-      await sendWhatsAppText(from, replies.BOOKING_START);
+      await logLeadSafely(convo, { phone: from, source, packageInterest: packageName, status: "مهتم بباقة" });
+      await sendWhatsAppText(from, replies.BOOKING_START, phoneNumberId);
       return;
     }
     // Not a bare number reply - fall through to normal handling below.
@@ -350,24 +371,24 @@ async function handleWhatsAppEvent(event) {
   if (type === "list_reply") {
     if (listId === "MENU_BOOK") {
       convo.step = "awaiting_booking_details";
-      await sendWhatsAppText(from, replies.BOOKING_START);
+      await sendWhatsAppText(from, replies.BOOKING_START, phoneNumberId);
       return;
     }
     const canned = replies[listId];
     if (canned) {
-      await sendWhatsAppText(from, canned);
+      await sendWhatsAppText(from, canned, phoneNumberId);
       if (listId === "MENU_OFFER") {
         convo.awaitingPackageChoice = true;
       }
       await logLeadSafely(convo, {
         phone: from,
-        source: "واتساب",
+        source,
         status: "عميل جديد",
         notes: `اختار من القايمة: ${text}`,
       });
     } else {
       // Unknown/unexpected list id - don't go silent, let them know how to continue.
-      await sendWhatsAppText(from, replies.UNRECOGNIZED_SELECTION);
+      await sendWhatsAppText(from, replies.UNRECOGNIZED_SELECTION, phoneNumberId);
     }
     return;
   }
@@ -375,7 +396,7 @@ async function handleWhatsAppEvent(event) {
   // 3) Free text while we're waiting for booking details.
   if (convo.step === "awaiting_booking_details") {
     convo.step = null;
-    await sendWhatsAppText(from, replies.BOOKING_RECEIVED);
+    await sendWhatsAppText(from, replies.BOOKING_RECEIVED, phoneNumberId);
 
     const transcript = `Customer phone number: ${from}\nCustomer message: ${text}`;
     const details = await extractBookingDetails(transcript);
@@ -386,7 +407,7 @@ async function handleWhatsAppEvent(event) {
         name: details.name,
         phone: from, // always keep the real WhatsApp contact number in this column
         altPhone,
-        source: "واتساب",
+        source,
         packageInterest: details.service,
         appointmentDate: details.date,
         appointmentTime: details.time,
@@ -401,7 +422,7 @@ async function handleWhatsAppEvent(event) {
       // even after the customer goes on to complete the booking naturally in later messages.
       await logLeadSafely(convo, {
         phone: from,
-        source: "واتساب",
+        source,
         status: "في انتظار تفاصيل الحجز",
         notes: `آخر رسالة أثناء الحجز: ${text}`,
       });
@@ -417,8 +438,8 @@ async function handleWhatsAppEvent(event) {
     pushHistory("whatsapp", from, "user", text);
     const reply = await getAiReply(text, convo.history.slice(0, -1), convo.lang);
     pushHistory("whatsapp", from, "assistant", reply);
-    await sendWhatsAppText(from, reply);
-    await sendWhatsAppList(from, menu);
+    await sendWhatsAppText(from, reply, phoneNumberId);
+    await sendWhatsAppList(from, menu, phoneNumberId);
     return;
   }
 
@@ -426,7 +447,7 @@ async function handleWhatsAppEvent(event) {
   pushHistory("whatsapp", from, "user", text);
   const reply = await getAiReply(text, convo.history.slice(0, -1), convo.lang);
   pushHistory("whatsapp", from, "assistant", reply);
-  await sendWhatsAppText(from, reply);
+  await sendWhatsAppText(from, reply, phoneNumberId);
   console.log(`WhatsApp reply sent to ${from}.`);
 
   // The AI often collects full booking details (name, service, date, time) naturally across
@@ -443,7 +464,7 @@ async function handleWhatsAppEvent(event) {
           name: details.name,
           phone: from, // always keep the real WhatsApp contact number in this column
           altPhone,
-          source: "واتساب",
+          source,
           packageInterest: details.service,
           appointmentDate: details.date,
           appointmentTime: details.time,
