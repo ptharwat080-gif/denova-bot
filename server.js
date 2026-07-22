@@ -14,7 +14,7 @@ const { getAiReply, extractBookingDetails } = require("./lib/claude");
 const { sendMetaText, parseMetaWebhookEvents, sendCommentReply, sendPrivateReply } = require("./lib/metaMessenger");
 const { sendWhatsAppText, sendWhatsAppList, sendWhatsAppTemplate, parseWhatsAppWebhookEvents } = require("./lib/whatsapp");
 const { WHATSAPP_MAIN_MENU, MENU_REPLIES, WHATSAPP_MAIN_MENU_EN, MENU_REPLIES_EN } = require("./lib/knowledge");
-const { getConversation, pushHistory, escalate } = require("./lib/state");
+const { getConversation, getAllConversations, pushHistory, escalate } = require("./lib/state");
 const { appendLead, updateLeadRow } = require("./lib/sheets");
 
 const app = express();
@@ -143,11 +143,11 @@ const PACKAGE_BY_NUMBER = {
  * @param {object} lead - the fields to set/update.
  */
 async function logLeadSafely(convo, lead) {
-  // Always attach the latest full transcript, built fresh from convo.history (already kept in
-  // memory for the AI's own context) - no extra API call, no extra cost, just re-serializing
-  // text we already have, so the clinic can read any conversation directly from the sheet.
+  // Attach the latest full transcript, built fresh from convo.history (already kept in memory
+  // for the AI's own context) - no extra API call, no extra cost, just re-serializing text we
+  // already have. WhatsApp only - Messenger/Instagram rows leave this column untouched.
   const transcript =
-    convo.history && convo.history.length
+    convo.platform === "whatsapp" && convo.history && convo.history.length
       ? convo.history.map((h) => `${h.role === "user" ? "العميل" : "العيادة"}: ${h.content}`).join("\n")
       : undefined;
 
@@ -327,6 +327,10 @@ async function handleWhatsAppEvent(event) {
   const convo = getConversation("whatsapp", from);
   const source = whatsappSourceLabel(phoneNumberId);
 
+  // Remembered so the inactivity follow-up job (below) can reply from the SAME WhatsApp number
+  // that this conversation has been happening on, if the clinic has two numbers configured.
+  if (phoneNumberId) convo.phoneNumberId = phoneNumberId;
+
   if (convo.escalated) return; // human has taken over
 
   // Detect and remember the customer's language from the first real text they send, so every
@@ -476,6 +480,68 @@ async function handleWhatsAppEvent(event) {
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// INACTIVITY FOLLOW-UP JOB
+// Runs on all three channels (WhatsApp / Messenger / Instagram). For every conversation that
+// hasn't booked yet and where WE are the ones waiting on a reply (our message was the last one):
+//   - after 1 hour of silence: write a note on that customer's existing sheet row so the clinic
+//     can see it went quiet (the full transcript is already kept up to date on that same row).
+//   - after 4 hours of silence: send the customer ONE re-engagement message and note it on the
+//     sheet. Never sends more than once per conversation.
+// This applies even to conversations that only ever had a first message - that row was already
+// created on first contact, so it's included and updated in place, not skipped or duplicated.
+// ---------------------------------------------------------------------------
+
+const HOUR_MS = 60 * 60 * 1000;
+const QUIET_ALERT_THRESHOLD_MS = 1 * HOUR_MS;
+const FOLLOW_UP_THRESHOLD_MS = 4 * HOUR_MS;
+const FOLLOW_UP_CHECK_INTERVAL_MS = 5 * 60 * 1000; // scan every 5 minutes
+
+const FOLLOW_UP_MESSAGE = {
+  ar: "أهلاً بيك تاني 🙏 لسه عروض يوم الافتتاح في Denova متاحة، حابب أساعدك تكمل حجزك؟ لو محتاج أي تفاصيل تانية، أنا موجود.",
+  en: "Hi again! 🙏 Denova's opening-day offers are still available - would you like help finishing your booking? Happy to answer any questions.",
+};
+
+async function checkInactiveConversations() {
+  const now = Date.now();
+  for (const { platform, senderId, convo } of getAllConversations()) {
+    if (convo.escalated) continue; // a human already took over - leave it alone
+    if (convo.leadData && convo.leadData.status === "تم الحجز") continue; // already booked
+    if (!convo.history || convo.history.length === 0) continue; // nothing happened yet
+
+    const lastEntry = convo.history[convo.history.length - 1];
+    if (!lastEntry || lastEntry.role !== "assistant") continue; // we're waiting on OUR reply, not theirs
+
+    const idleMs = now - convo.lastActivity;
+
+    if (!convo.hourAlertSent && idleMs >= QUIET_ALERT_THRESHOLD_MS) {
+      convo.hourAlertSent = true;
+      await logLeadSafely(convo, { notes: "⚠️ العميل ما ردش من ساعة - محتاج متابعة" });
+    }
+
+    if (!convo.followUpSent && idleMs >= FOLLOW_UP_THRESHOLD_MS) {
+      convo.followUpSent = true;
+      const lang = convo.lang === "en" ? "en" : "ar";
+      const message = FOLLOW_UP_MESSAGE[lang];
+      try {
+        if (platform === "whatsapp") {
+          await sendWhatsAppText(senderId, message, convo.phoneNumberId);
+        } else {
+          await sendMetaText(platform, senderId, message);
+        }
+        pushHistory(platform, senderId, "assistant", message);
+        await logLeadSafely(convo, { notes: "📞 اتبعتله رسالة متابعة تلقائية بعد عدم الرد" });
+      } catch (err) {
+        console.error(`Failed to send follow-up to ${platform}:${senderId}:`, err.message);
+      }
+    }
+  }
+}
+
+setInterval(() => {
+  checkInactiveConversations().catch((err) => console.error("checkInactiveConversations failed:", err));
+}, FOLLOW_UP_CHECK_INTERVAL_MS);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Denova bot listening on port ${PORT}`));
