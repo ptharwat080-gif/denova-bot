@@ -64,6 +64,45 @@ function wantsHuman(text = "") {
   return ESCALATION_KEYWORDS.some((kw) => lower.includes(kw.toLowerCase()));
 }
 
+// Job/vacancy inquiries (including a doctor asking about working at the clinic) are not
+// patient leads - the bot should stay completely silent on these, not reply at all.
+const JOB_KEYWORDS = [
+  "وظيفة",
+  "وظايف",
+  "وظائف",
+  "فرصة عمل",
+  "فرص عمل",
+  "فرصة شغل",
+  "اشتغل عندكم",
+  "اشتغل معاكم",
+  "أشتغل عندكم",
+  "أشتغل معاكم",
+  "شغل عندكم",
+  "متقدم لوظيفة",
+  "التقديم على وظيفة",
+  "تقديم على وظيفة",
+  "سيرة ذاتية",
+  "السيرة الذاتية",
+  "cv",
+  "توظيف",
+  "تعيين",
+  "محتاجين دكتور",
+  "محتاجين طبيب",
+  "hiring",
+  "job opening",
+  "job vacancy",
+  "job opportunity",
+  "looking for a job",
+  "apply for a job",
+  "send my cv",
+  "send my resume",
+];
+
+function wantsJob(text = "") {
+  const lower = text.toLowerCase();
+  return JOB_KEYWORDS.some((kw) => lower.includes(kw.toLowerCase()));
+}
+
 // Simple language detection: if the message contains any Arabic-script characters,
 // treat the conversation as Arabic; otherwise treat it as English. Used to pick the
 // right interactive-menu language and canned-reply language for WhatsApp.
@@ -76,12 +115,6 @@ function isArabicText(text = "") {
 // is messaging from, rather than just formatted differently.
 function normalizePhone(value = "") {
   return String(value).replace(/[^\d]/g, "");
-}
-
-// Heuristic: a message that contains a run of 10+ digits is very likely someone
-// sharing a phone number as part of booking details (name + number + date/time).
-function looksLikeBookingDetails(text = "") {
-  return /\d{10,}/.test(text.replace(/[\s\-()]/g, ""));
 }
 
 // WhatsApp template parameter values can't contain newlines/tabs or long runs of spaces -
@@ -142,6 +175,27 @@ const PACKAGE_BY_NUMBER = {
  *   non-conversational logs like public comments, which will always append a fresh row).
  * @param {object} lead - the fields to set/update.
  */
+// Builds a sheet-update object from whatever fields extractBookingDetails() found, omitting any
+// key it didn't return - logLeadSafely() merges this on top of whatever's already saved for the
+// lead, so a key we omit here simply leaves that field as it already was instead of blanking it.
+function leadUpdateFromDetails(details, extra = {}, { includePhone = true } = {}) {
+  const update = { ...extra };
+  if (details.name) update.name = details.name;
+  if (includePhone && details.phone) update.phone = details.phone;
+  if (details.service) update.packageInterest = details.service;
+  if (details.date) update.appointmentDate = details.date;
+  if (details.time) update.appointmentTime = details.time;
+  if (details.otherTopics) update.otherTopics = details.otherTopics;
+  if (details.complete) update.status = "تم الحجز";
+  // Strip any undefined-valued key (e.g. a conditional notes: someCond ? "..." : undefined at
+  // the call site) so it's never spread into logLeadSafely's merge and blank out a real value
+  // that was already saved for this lead.
+  for (const k of Object.keys(update)) {
+    if (update[k] === undefined) delete update[k];
+  }
+  return update;
+}
+
 async function logLeadSafely(convo, lead) {
   // Attach the latest full transcript, built fresh from convo.history (already kept in memory
   // for the AI's own context) - no extra API call, no extra cost, just re-serializing text we
@@ -230,6 +284,18 @@ async function handleMetaMessage(event) {
     return;
   }
 
+  // Job/vacancy inquiries (including a doctor asking about work) are not patient leads -
+  // go completely silent on this conversation instead of replying like a normal customer.
+  if (wantsJob(text)) {
+    escalate(platform, senderId);
+    await logLeadSafely(convo, {
+      source: platform === "instagram" ? "انستجرام" : "ماسنجر",
+      status: "استفسار وظيفة",
+      notes: `استفسار عن وظيفة/شغل - متجاهل: ${text || ""}`,
+    });
+    return;
+  }
+
   // Log the contact immediately, before doing anything that could fail (AI call, send call).
   // This way, even if something breaks downstream, we still have a record that this person
   // reached out - never lose a lead just because a later step errored.
@@ -265,31 +331,27 @@ async function handleMetaMessage(event) {
   pushHistory(platform, senderId, "assistant", reply);
   await sendMetaText(platform, senderId, reply);
 
-  // Check the WHOLE conversation so far, not just this one message, for booking details -
-  // the AI often collects name/phone/service/date/time naturally across several messages,
-  // and we don't want to miss it just because the phone number appeared a few turns back.
+  // Check the WHOLE conversation so far, not just this one message, for booking details - run
+  // this on EVERY turn (not gated behind a "looks like it has a phone number" heuristic), because
+  // unlike WhatsApp there's no phone number attached to a Messenger/Instagram conversation
+  // automatically. A customer who only gives their name in one message still needs that name
+  // saved right away, not held back until every other field happens to show up together.
   if (!isFirstContact && (!convo.leadData || convo.leadData.status !== "تم الحجز")) {
     const transcript = convo.history.map((h) => `${h.role === "user" ? "Customer" : "Clinic"}: ${h.content}`).join("\n");
-    if (looksLikeBookingDetails(transcript)) {
-      const details = await extractBookingDetails(transcript);
-      if (details) {
-        await logLeadSafely(convo, {
-          name: details.name,
-          phone: details.phone,
-          source: platform === "instagram" ? "انستجرام" : "ماسنجر",
-          packageInterest: details.service,
-          appointmentDate: details.date,
-          appointmentTime: details.time,
-          status: "تم الحجز",
-          otherTopics: details.otherTopics || "",
-          notes: "تفاصيل حجز تم استخراجها تلقائيًا من المحادثة.",
-        });
-      } else {
-        await logLeadSafely(convo, {
-          source: platform === "instagram" ? "انستجرام" : "ماسنجر",
-          notes: `آخر رسالة: ${text}`,
-        });
-      }
+    const details = await extractBookingDetails(transcript);
+    const metaSource = platform === "instagram" ? "انستجرام" : "ماسنجر";
+    if (details) {
+      await logLeadSafely(
+        convo,
+        leadUpdateFromDetails(details, {
+          source: metaSource,
+          notes: details.complete
+            ? "تفاصيل حجز تم استخراجها تلقائيًا من المحادثة."
+            : `آخر رسالة: ${text}`,
+        })
+      );
+    } else {
+      await logLeadSafely(convo, { source: metaSource, notes: `آخر رسالة: ${text}` });
     }
   }
 }
@@ -332,6 +394,19 @@ async function handleWhatsAppEvent(event) {
   if (phoneNumberId) convo.phoneNumberId = phoneNumberId;
 
   if (convo.escalated) return; // human has taken over
+
+  // Job/vacancy inquiries (including a doctor asking about work) are not patient leads -
+  // go completely silent on this conversation instead of replying like a normal customer.
+  if (type === "text" && wantsJob(text)) {
+    escalate("whatsapp", from);
+    await logLeadSafely(convo, {
+      phone: from,
+      source,
+      status: "استفسار وظيفة",
+      notes: `استفسار عن وظيفة/شغل - متجاهل: ${text || ""}`,
+    });
+    return;
+  }
 
   // Detect and remember the customer's language from the first real text they send, so every
   // canned reply and menu after this matches it - not just the free-form AI replies.
@@ -407,23 +482,26 @@ async function handleWhatsAppEvent(event) {
     if (details) {
       const altPhone =
         details.phone && normalizePhone(details.phone) !== normalizePhone(from) ? details.phone : "";
-      await logLeadSafely(convo, {
-        name: details.name,
-        phone: from, // always keep the real WhatsApp contact number in this column
-        altPhone,
-        source,
-        packageInterest: details.service,
-        appointmentDate: details.date,
-        appointmentTime: details.time,
-        status: "تم الحجز",
-        otherTopics: details.otherTopics || "",
-        notes: "تفاصيل حجز تم استخراجها تلقائيًا من المحادثة.",
-      });
+      // Do NOT mark as "تم الحجز" (booked) unless all 5 fields are complete - that would stop us
+      // from ever re-checking the conversation later, even after the customer goes on to finish
+      // the booking naturally in later messages.
+      await logLeadSafely(
+        convo,
+        leadUpdateFromDetails(
+          details,
+          {
+            phone: from, // always keep the real WhatsApp contact number in this column
+            altPhone,
+            source,
+            status: details.complete ? "تم الحجز" : "في انتظار تفاصيل الحجز",
+            notes: details.complete
+              ? "تفاصيل حجز تم استخراجها تلقائيًا من المحادثة."
+              : `آخر رسالة أثناء الحجز: ${text}`,
+          },
+          { includePhone: false }
+        )
+      );
     } else {
-      // Extraction failed because this first reply didn't contain all 5 details yet (e.g. the
-      // customer just said "I have pain" instead of giving name/date/time). Do NOT mark this as
-      // "تم الحجز" (booked) - that would stop us from ever re-checking the conversation later,
-      // even after the customer goes on to complete the booking naturally in later messages.
       await logLeadSafely(convo, {
         phone: from,
         source,
@@ -454,29 +532,30 @@ async function handleWhatsAppEvent(event) {
   await sendWhatsAppText(from, reply, phoneNumberId);
   console.log(`WhatsApp reply sent to ${from}.`);
 
-  // The AI often collects full booking details (name, service, date, time) naturally across
-  // several plain-chat messages, without the customer ever tapping the booking menu button.
-  // Check the WHOLE conversation so far after every reply so this still gets captured.
+  // The AI often collects booking details (name, service, date, time) naturally across several
+  // plain-chat messages, without the customer ever tapping the booking menu button. Check the
+  // WHOLE conversation so far after every reply so this still gets captured - including a
+  // customer who only gives their name and nothing else yet, which the old digit-heuristic gate
+  // used to miss entirely (it only ran extraction when a 10+ digit run was present).
   if (!convo.leadData || convo.leadData.status !== "تم الحجز") {
     const transcript = convo.history.map((h) => `${h.role === "user" ? "Customer" : "Clinic"}: ${h.content}`).join("\n");
-    if (looksLikeBookingDetails(transcript)) {
-      const details = await extractBookingDetails(transcript);
-      if (details) {
-        const altPhone =
-          details.phone && normalizePhone(details.phone) !== normalizePhone(from) ? details.phone : "";
-        await logLeadSafely(convo, {
-          name: details.name,
-          phone: from, // always keep the real WhatsApp contact number in this column
-          altPhone,
-          source,
-          packageInterest: details.service,
-          appointmentDate: details.date,
-          appointmentTime: details.time,
-          status: "تم الحجز",
-          otherTopics: details.otherTopics || "",
-          notes: "تفاصيل حجز تم استخراجها تلقائيًا من المحادثة.",
-        });
-      }
+    const details = await extractBookingDetails(transcript);
+    if (details) {
+      const altPhone =
+        details.phone && normalizePhone(details.phone) !== normalizePhone(from) ? details.phone : "";
+      await logLeadSafely(
+        convo,
+        leadUpdateFromDetails(
+          details,
+          {
+            phone: from, // always keep the real WhatsApp contact number in this column
+            altPhone,
+            source,
+            notes: details.complete ? "تفاصيل حجز تم استخراجها تلقائيًا من المحادثة." : undefined,
+          },
+          { includePhone: false }
+        )
+      );
     }
   }
 }
