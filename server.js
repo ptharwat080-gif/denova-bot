@@ -274,10 +274,29 @@ async function handleMetaComment(event) {
   );
 }
 
+// Temporary pause switch, per channel. Set back to false to resume auto-replies on that
+// channel - no other code changes needed. While paused, the bot stays completely silent but
+// still logs the contact to the sheet, so no lead is lost while you're handling it manually.
+const PAUSED_PLATFORMS = {
+  messenger: true,
+  instagram: false,
+};
+
 async function handleMetaMessage(event) {
   const { platform, senderId, text } = event;
   const convo = getConversation(platform, senderId);
   const isFirstContact = convo.history.length === 0 && !convo.escalated;
+
+  if (PAUSED_PLATFORMS[platform]) {
+    if (!convo.sheetRow) {
+      await logLeadSafely(convo, {
+        source: platform === "instagram" ? "انستجرام" : "ماسنجر",
+        status: "عميل جديد",
+        notes: `أول رسالة (الشات موقّف مؤقتًا): ${text || ""}`,
+      });
+    }
+    return; // stay silent - no AI reply while paused
+  }
 
   if (convo.escalated) {
     // A human already took over this conversation - stay silent, just observe.
@@ -577,6 +596,11 @@ const QUIET_ALERT_THRESHOLD_MS = 1 * HOUR_MS;
 const FOLLOW_UP_THRESHOLD_MS = 4 * HOUR_MS;
 const FOLLOW_UP_CHECK_INTERVAL_MS = 5 * 60 * 1000; // scan every 5 minutes
 
+// Turned off per clinic request - stop auto-sending the 4-hour re-engagement message to
+// customers, and stop writing the 1-hour "customer went quiet" sheet note too.
+const SEND_CUSTOMER_FOLLOW_UP = false;
+const WRITE_QUIET_ALERT_NOTE = false;
+
 const FOLLOW_UP_MESSAGE = {
   ar: "أهلاً بيك تاني 🙏 لسه عروض يوم الافتتاح في Denova متاحة، حابب أساعدك تكمل حجزك؟ لو محتاج أي تفاصيل تانية، أنا موجود.",
   en: "Hi again! 🙏 Denova's opening-day offers are still available - would you like help finishing your booking? Happy to answer any questions.",
@@ -594,12 +618,12 @@ async function checkInactiveConversations() {
 
     const idleMs = now - convo.lastActivity;
 
-    if (!convo.hourAlertSent && idleMs >= QUIET_ALERT_THRESHOLD_MS) {
+    if (WRITE_QUIET_ALERT_NOTE && !convo.hourAlertSent && idleMs >= QUIET_ALERT_THRESHOLD_MS) {
       convo.hourAlertSent = true;
       await logLeadSafely(convo, { notes: "⚠️ العميل ما ردش من ساعة - محتاج متابعة" });
     }
 
-    if (!convo.followUpSent && idleMs >= FOLLOW_UP_THRESHOLD_MS) {
+    if (SEND_CUSTOMER_FOLLOW_UP && !convo.followUpSent && idleMs >= FOLLOW_UP_THRESHOLD_MS) {
       convo.followUpSent = true;
       const lang = convo.lang === "en" ? "en" : "ar";
       const message = FOLLOW_UP_MESSAGE[lang];
