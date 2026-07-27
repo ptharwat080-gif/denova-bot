@@ -13,7 +13,7 @@ const express = require("express");
 const { getAiReply, extractBookingDetails } = require("./lib/claude");
 const { sendMetaText, parseMetaWebhookEvents, sendCommentReply, sendPrivateReply } = require("./lib/metaMessenger");
 const { sendWhatsAppText, sendWhatsAppList, sendWhatsAppTemplate, parseWhatsAppWebhookEvents } = require("./lib/whatsapp");
-const { WHATSAPP_MAIN_MENU, MENU_REPLIES, WHATSAPP_MAIN_MENU_EN, MENU_REPLIES_EN } = require("./lib/knowledge");
+const { WHATSAPP_MAIN_MENU, MENU_REPLIES, WHATSAPP_MAIN_MENU_EN, MENU_REPLIES_EN, getOfferStatus } = require("./lib/knowledge");
 const { getConversation, getAllConversations, pushHistory, escalate } = require("./lib/state");
 const { appendLead, updateLeadRow } = require("./lib/sheets");
 
@@ -472,10 +472,14 @@ async function handleWhatsAppEvent(event) {
       await sendWhatsAppText(from, replies.BOOKING_START, phoneNumberId);
       return;
     }
-    const canned = replies[listId];
+    // MENU_OFFER is date-sensitive: pick the "still running" vs "ended" canned reply based on
+    // today's real date (see getOfferStatus in lib/knowledge.js) instead of a fixed string, so
+    // the opening-offer copy retires itself automatically once the offer window closes.
+    const offerStillActive = getOfferStatus() !== "offer_ended";
+    const canned = listId === "MENU_OFFER" ? (offerStillActive ? replies.MENU_OFFER : replies.MENU_OFFER_ENDED) : replies[listId];
     if (canned) {
       await sendWhatsAppText(from, canned, phoneNumberId);
-      if (listId === "MENU_OFFER") {
+      if (listId === "MENU_OFFER" && offerStillActive) {
         convo.awaitingPackageChoice = true;
       }
       await logLeadSafely(convo, {
