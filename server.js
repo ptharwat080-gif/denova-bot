@@ -11,7 +11,7 @@ require("dotenv").config();
 const express = require("express");
 
 const { getAiReply, extractBookingDetails } = require("./lib/claude");
-const { sendMetaText, parseMetaWebhookEvents, sendCommentReply, sendPrivateReply } = require("./lib/metaMessenger");
+const { sendMetaText, parseMetaWebhookEvents, sendCommentReply, sendPrivateReply, getMetaUserName } = require("./lib/metaMessenger");
 const { sendWhatsAppText, sendWhatsAppList, sendWhatsAppTemplate, parseWhatsAppWebhookEvents } = require("./lib/whatsapp");
 const { WHATSAPP_MAIN_MENU, MENU_REPLIES, WHATSAPP_MAIN_MENU_EN, MENU_REPLIES_EN, getOfferStatus } = require("./lib/knowledge");
 const { getConversation, getAllConversations, pushHistory, escalate } = require("./lib/state");
@@ -287,9 +287,18 @@ async function handleMetaMessage(event) {
   const convo = getConversation(platform, senderId);
   const isFirstContact = convo.history.length === 0 && !convo.escalated;
 
+  // Unlike WhatsApp (whose webhook includes the contact's profile name for free), Meta's
+  // messaging webhook never sends a name - only the opaque PSID/IGSID - so without this extra
+  // Graph API lookup every Messenger/Instagram sheet row would stay nameless. Fetched once,
+  // before any of the three possible first-log points below, and reused by whichever fires.
+  // Best-effort: getMetaUserName() never throws and returns "" if Meta doesn't return a name
+  // (e.g. before the app clears Meta's App Review).
+  const senderName = convo.sheetRow ? "" : await getMetaUserName(platform, senderId);
+
   if (PAUSED_PLATFORMS[platform]) {
     if (!convo.sheetRow) {
       await logLeadSafely(convo, {
+        name: senderName,
         source: platform === "instagram" ? "انستجرام" : "ماسنجر",
         status: "عميل جديد",
         notes: `أول رسالة (الشات موقّف مؤقتًا): ${text || ""}`,
@@ -308,6 +317,7 @@ async function handleMetaMessage(event) {
   if (wantsJob(text)) {
     escalate(platform, senderId);
     await logLeadSafely(convo, {
+      name: senderName,
       source: platform === "instagram" ? "انستجرام" : "ماسنجر",
       status: "استفسار وظيفة",
       notes: `استفسار عن وظيفة/شغل - متجاهل: ${text || ""}`,
@@ -320,6 +330,7 @@ async function handleMetaMessage(event) {
   // reached out - never lose a lead just because a later step errored.
   if (!convo.sheetRow) {
     await logLeadSafely(convo, {
+      name: senderName,
       source: platform === "instagram" ? "انستجرام" : "ماسنجر",
       status: "عميل جديد",
       notes: `أول رسالة: ${text}`,
@@ -424,6 +435,7 @@ async function handleWhatsAppEvent(event) {
   if (type === "text" && wantsJob(text)) {
     escalate("whatsapp", from);
     await logLeadSafely(convo, {
+      name,
       phone: from,
       source,
       status: "استفسار وظيفة",
@@ -444,8 +456,11 @@ async function handleWhatsAppEvent(event) {
   // Log the phone number immediately on first contact, before anything that could fail
   // (AI call, WhatsApp send call). This way we always have a way to reach this person back,
   // even if a later step in this same message errors out.
+  // `name` here is the customer's WhatsApp profile name, sent by Meta directly in the webhook
+  // payload (see contact.profile.name in lib/whatsapp.js) - no extra API call needed, unlike
+  // Messenger/Instagram where a name has to be fetched separately (see getMetaUserName above).
   if (!convo.sheetRow && from) {
-    await logLeadSafely(convo, { phone: from, source, status: "عميل جديد", notes: `أول رسالة: ${text || ""}` });
+    await logLeadSafely(convo, { name, phone: from, source, status: "عميل جديد", notes: `أول رسالة: ${text || ""}` });
   }
 
   // 1) Explicit human handoff, any time.
