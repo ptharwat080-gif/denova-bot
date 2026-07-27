@@ -278,7 +278,7 @@ async function handleMetaComment(event) {
 // channel - no other code changes needed. While paused, the bot stays completely silent but
 // still logs the contact to the sheet, so no lead is lost while you're handling it manually.
 const PAUSED_PLATFORMS = {
-  messenger: true,
+  messenger: false,
   instagram: false,
 };
 
@@ -347,8 +347,13 @@ async function handleMetaMessage(event) {
 
   pushHistory(platform, senderId, "user", text);
   const reply = await getAiReply(text, convo.history.slice(0, -1), convo.lang);
-  pushHistory(platform, senderId, "assistant", reply);
-  await sendMetaText(platform, senderId, reply);
+  // reply === null means the AI judged this message completely unrelated to the clinic (spam,
+  // job inquiry, wrong number, etc.) - stay silent, don't send anything and don't log a fake
+  // assistant turn (the contact itself was already logged above regardless).
+  if (reply !== null) {
+    pushHistory(platform, senderId, "assistant", reply);
+    await sendMetaText(platform, senderId, reply);
+  }
 
   // Check the WHOLE conversation so far, not just this one message, for booking details - run
   // this on EVERY turn (not gated behind a "looks like it has a phone number" heuristic), because
@@ -542,18 +547,26 @@ async function handleWhatsAppEvent(event) {
     convo.seenMenu = true;
     pushHistory("whatsapp", from, "user", text);
     const reply = await getAiReply(text, convo.history.slice(0, -1), convo.lang);
-    pushHistory("whatsapp", from, "assistant", reply);
-    await sendWhatsAppText(from, reply, phoneNumberId);
-    await sendWhatsAppList(from, menu, phoneNumberId);
+    // reply === null -> this first message was unrelated to the clinic (spam, job inquiry,
+    // wrong number, etc.) - stay completely silent, don't even send the menu.
+    if (reply !== null) {
+      pushHistory("whatsapp", from, "assistant", reply);
+      await sendWhatsAppText(from, reply, phoneNumberId);
+      await sendWhatsAppList(from, menu, phoneNumberId);
+    }
     return;
   }
 
   // 5) Anything else -> fall back to the AI for a free-form, on-brand reply.
   pushHistory("whatsapp", from, "user", text);
   const reply = await getAiReply(text, convo.history.slice(0, -1), convo.lang);
-  pushHistory("whatsapp", from, "assistant", reply);
-  await sendWhatsAppText(from, reply, phoneNumberId);
-  console.log(`WhatsApp reply sent to ${from}.`);
+  // reply === null -> unrelated to the clinic (spam, job inquiry, wrong number, etc.) - stay
+  // silent. Booking-detail extraction below still runs off whatever's in convo.history so far.
+  if (reply !== null) {
+    pushHistory("whatsapp", from, "assistant", reply);
+    await sendWhatsAppText(from, reply, phoneNumberId);
+    console.log(`WhatsApp reply sent to ${from}.`);
+  }
 
   // The AI often collects booking details (name, service, date, time) naturally across several
   // plain-chat messages, without the customer ever tapping the booking menu button. Check the
