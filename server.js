@@ -11,14 +11,28 @@ require("dotenv").config();
 const express = require("express");
 
 const { getAiReply, extractBookingDetails } = require("./lib/claude");
-const { sendMetaText, parseMetaWebhookEvents, sendCommentReply, sendPrivateReply, getMetaUserName } = require("./lib/metaMessenger");
+const {
+  sendMetaText,
+  parseMetaWebhookEvents,
+  sendCommentReply,
+  sendPrivateReply,
+  getMetaUserName,
+  isOurOwnMessage,
+} = require("./lib/metaMessenger");
 const { sendWhatsAppText, sendWhatsAppList, sendWhatsAppTemplate, parseWhatsAppWebhookEvents } = require("./lib/whatsapp");
 const { WHATSAPP_MAIN_MENU, MENU_REPLIES, WHATSAPP_MAIN_MENU_EN, MENU_REPLIES_EN, getOfferStatus } = require("./lib/knowledge");
 const { getConversation, getAllConversations, pushHistory, escalate } = require("./lib/state");
 const { appendLead, updateLeadRow } = require("./lib/sheets");
+const { mountDashboard } = require("./lib/dashboard");
 
 const app = express();
 app.use(express.json());
+
+// Password-protected live chat dashboard for the bot's WhatsApp number only (see lib/dashboard.js).
+// Visit /dashboard, log in with the shared password (DASHBOARD_PASSWORD env var, or the built-in
+// default), and reply to any conversation directly - it hands that chat over to a human and the
+// bot stops auto-replying to it, same as any other escalation.
+mountDashboard(app);
 
 const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN;
 const WHATSAPP_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
@@ -242,7 +256,9 @@ app.post("/webhook/meta", async (req, res) => {
   try {
     const events = parseMetaWebhookEvents(req.body);
     for (const event of events) {
-      if (event.isComment) {
+      if (event.isEcho) {
+        handleMetaEcho(event);
+      } else if (event.isComment) {
         await handleMetaComment(event);
       } else {
         await handleMetaMessage(event);
@@ -272,6 +288,23 @@ async function handleMetaComment(event) {
       notes: `تعليق: ${event.text || ""}`,
     }
   );
+}
+
+// Fires whenever the page/IG account sends a message to a customer - including one sent by a
+// human agent replying manually through Meta Business Suite / Page Inbox (not just our own bot
+// replies). If the message id isn't one WE sent (see isOurOwnMessage in lib/metaMessenger.js),
+// a human has taken over this conversation - silence the bot for that customer from now on,
+// exactly like the existing "طلب التحدث مع موظف" escalation path.
+//
+// IMPORTANT: this only fires at all if the "message_echoes" field is subscribed on this app's
+// webhook in the Meta App Dashboard (Messenger > Webhooks) - it isn't included by default.
+function handleMetaEcho(event) {
+  const { platform, senderId, mid } = event;
+  if (isOurOwnMessage(mid)) return; // our own bot reply echoing back - nothing to do
+  const convo = getConversation(platform, senderId);
+  if (convo.escalated) return; // already silenced
+  escalate(platform, senderId);
+  console.log(`Human agent replied manually on ${platform} to ${senderId} - bot silenced for this conversation.`);
 }
 
 // Temporary pause switch, per channel. Set back to false to resume auto-replies on that
