@@ -20,7 +20,7 @@ const {
   isOurOwnMessage,
 } = require("./lib/metaMessenger");
 const { sendWhatsAppText, sendWhatsAppList, sendWhatsAppTemplate, parseWhatsAppWebhookEvents } = require("./lib/whatsapp");
-const { WHATSAPP_MAIN_MENU, MENU_REPLIES, WHATSAPP_MAIN_MENU_EN, MENU_REPLIES_EN, getOfferStatus } = require("./lib/knowledge");
+const { WHATSAPP_MAIN_MENU, MENU_REPLIES, WHATSAPP_MAIN_MENU_EN, MENU_REPLIES_EN } = require("./lib/knowledge");
 const { getConversation, getAllConversations, pushHistory, escalate } = require("./lib/state");
 const { appendLead, updateLeadRow } = require("./lib/sheets");
 const { mountDashboard } = require("./lib/dashboard");
@@ -167,17 +167,6 @@ async function notifyClinicStaff(customerContact, summary) {
   }
 }
 
-// Bare-number replies mapped to opening-day packages, used right after we show the
-// numbered offer list so a customer can just reply "1"/"2"/"3" (Arabic-Indic digits too).
-const PACKAGE_BY_NUMBER = {
-  "1": "Essential Clean",
-  "2": "Complete Care",
-  "3": "Bright Smile",
-  "١": "Essential Clean",
-  "٢": "Complete Care",
-  "٣": "Bright Smile",
-};
-
 /**
  * Logs a lead against a conversation, keeping ONE row per conversation instead of a new row
  * per touchpoint. The first call appends a row and remembers its number on `convo.sheetRow`;
@@ -277,7 +266,7 @@ async function handleMetaComment(event) {
   // Private reply (arrives as a Messenger DM to the commenter) - this is where real info goes.
   await sendPrivateReply(
     event.commentId,
-    "أهلاً بيك في Denova Dental Clinic! يسعدنا اهتمامك. تحب تعرف تفاصيل عروض الافتتاح، ولا تحجز كشف على طول؟"
+    "أهلاً بيك في Denova Dental Clinic! يسعدنا اهتمامك. تحب تعرف تفاصيل خدماتنا، ولا تحجز كشف على طول؟"
   ).catch((e) => console.error(e.message));
 
   await logLeadSafely(
@@ -505,19 +494,6 @@ async function handleWhatsAppEvent(event) {
     return;
   }
 
-  // 1.5) Customer replying with just a package number after we showed the numbered offers.
-  if (type === "text" && convo.awaitingPackageChoice) {
-    convo.awaitingPackageChoice = false;
-    const packageName = PACKAGE_BY_NUMBER[text.trim()];
-    if (packageName) {
-      convo.step = "awaiting_booking_details";
-      await logLeadSafely(convo, { phone: from, source, packageInterest: packageName, status: "مهتم بباقة" });
-      await sendWhatsAppText(from, replies.BOOKING_START, phoneNumberId);
-      return;
-    }
-    // Not a bare number reply - fall through to normal handling below.
-  }
-
   // 2) List selection.
   if (type === "list_reply") {
     if (listId === "MENU_BOOK") {
@@ -525,16 +501,9 @@ async function handleWhatsAppEvent(event) {
       await sendWhatsAppText(from, replies.BOOKING_START, phoneNumberId);
       return;
     }
-    // MENU_OFFER is date-sensitive: pick the "still running" vs "ended" canned reply based on
-    // today's real date (see getOfferStatus in lib/knowledge.js) instead of a fixed string, so
-    // the opening-offer copy retires itself automatically once the offer window closes.
-    const offerStillActive = getOfferStatus() !== "offer_ended";
-    const canned = listId === "MENU_OFFER" ? (offerStillActive ? replies.MENU_OFFER : replies.MENU_OFFER_ENDED) : replies[listId];
+    const canned = replies[listId];
     if (canned) {
       await sendWhatsAppText(from, canned, phoneNumberId);
-      if (listId === "MENU_OFFER" && offerStillActive) {
-        convo.awaitingPackageChoice = true;
-      }
       await logLeadSafely(convo, {
         phone: from,
         source,
