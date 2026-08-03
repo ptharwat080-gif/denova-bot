@@ -22,7 +22,7 @@ const {
 const { sendWhatsAppText, sendWhatsAppList, sendWhatsAppTemplate, parseWhatsAppWebhookEvents } = require("./lib/whatsapp");
 const { WHATSAPP_MAIN_MENU, MENU_REPLIES, WHATSAPP_MAIN_MENU_EN, MENU_REPLIES_EN } = require("./lib/knowledge");
 const { getConversation, getAllConversations, pushHistory, escalate } = require("./lib/state");
-const { appendLead, updateLeadRow } = require("./lib/sheets");
+const { appendLead, updateLeadRow, loadAllLeadRows } = require("./lib/sheets");
 const { mountDashboard } = require("./lib/dashboard");
 
 const app = express();
@@ -636,8 +636,8 @@ const SEND_CUSTOMER_FOLLOW_UP = false;
 const WRITE_QUIET_ALERT_NOTE = false;
 
 const FOLLOW_UP_MESSAGE = {
-  ar: "أهلاً بيك تاني 🙏 لسه عروض يوم الافتتاح في Denova متاحة، حابب أساعدك تكمل حجزك؟ لو محتاج أي تفاصيل تانية، أنا موجود.",
-  en: "Hi again! 🙏 Denova's opening-day offers are still available - would you like help finishing your booking? Happy to answer any questions.",
+  ar: "أهلاً بيك تاني 🙏 حابب أساعدك تكمل حجزك في Denova؟ لو محتاج أي تفاصيل تانية، أنا موجود.",
+  en: "Hi again! 🙏 Would you like help finishing your booking with Denova? Happy to answer any questions.",
 };
 
 async function checkInactiveConversations() {
@@ -680,7 +680,58 @@ setInterval(() => {
   checkInactiveConversations().catch((err) => console.error("checkInactiveConversations failed:", err));
 }, FOLLOW_UP_CHECK_INTERVAL_MS);
 
+// ---------------------------------------------------------------------------
+// Rebuild in-memory conversation state (used by /dashboard and the AI's own context) from the
+// Google Sheet on every startup. The Map in lib/state.js only lives in RAM, so a redeploy or
+// restart normally wipes it - the sheet is the one thing that's already durable and free, so we
+// replay it back in instead of paying for a database or persistent disk just for this.
+// ---------------------------------------------------------------------------
+function parseTranscript(transcript = "") {
+  return transcript
+    .split("\n")
+    .map((line) => {
+      if (line.startsWith("العميل: ")) return { role: "user", content: line.slice("العميل: ".length) };
+      if (line.startsWith("العيادة: ")) return { role: "assistant", content: line.slice("العيادة: ".length) };
+      return null;
+    })
+    .filter(Boolean);
+}
+
+async function rehydrateFromSheet() {
+  try {
+    const rows = await loadAllLeadRows();
+    let restored = 0;
+    for (const row of rows) {
+      if (!row.phone || !row.source.startsWith("واتساب")) continue; // dashboard is WhatsApp-only
+      const convo = getConversation("whatsapp", row.phone);
+      if (row.transcript) {
+        const history = parseTranscript(row.transcript);
+        if (history.length) convo.history = history.slice(-10); // match pushHistory's own cap
+      }
+      convo.leadData = {
+        name: row.name,
+        phone: row.phone,
+        packageInterest: row.packageInterest,
+        status: row.status,
+        appointmentDate: row.appointmentDate,
+        appointmentTime: row.appointmentTime,
+        notes: row.notes,
+        altPhone: row.altPhone,
+        otherTopics: row.otherTopics,
+      };
+      convo.sheetRow = row.row; // so the next update overwrites this row instead of duplicating it
+      restored++;
+    }
+    console.log(`Rehydrated ${restored} WhatsApp conversation(s) from the Google Sheet.`);
+  } catch (err) {
+    // Never block startup on this - worst case the dashboard just starts empty, same as before.
+    console.error("Failed to rehydrate conversations from Google Sheet:", err.message);
+  }
+}
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Denova bot listening on port ${PORT}`));
+rehydrateFromSheet().finally(() => {
+  app.listen(PORT, () => console.log(`Denova bot listening on port ${PORT}`));
+});
 
 module.exports = app;
