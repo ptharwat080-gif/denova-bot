@@ -167,6 +167,17 @@ async function notifyClinicStaff(customerContact, summary) {
   }
 }
 
+// Bare-number replies mapped to the current limited-time offers, used right after we show the
+// numbered offer list so a customer can just reply "1"/"2"/"3" (Arabic-Indic digits too).
+const PACKAGE_BY_NUMBER = {
+  "1": "Smile Refresh",
+  "2": "Veneers",
+  "3": "Dental Implants",
+  "١": "Smile Refresh",
+  "٢": "Veneers",
+  "٣": "Dental Implants",
+};
+
 /**
  * Logs a lead against a conversation, keeping ONE row per conversation instead of a new row
  * per touchpoint. The first call appends a row and remembers its number on `convo.sheetRow`;
@@ -494,6 +505,19 @@ async function handleWhatsAppEvent(event) {
     return;
   }
 
+  // 1.5) Customer replying with just an offer number after we showed the numbered offers.
+  if (type === "text" && convo.awaitingPackageChoice) {
+    convo.awaitingPackageChoice = false;
+    const packageName = PACKAGE_BY_NUMBER[text.trim()];
+    if (packageName) {
+      convo.step = "awaiting_booking_details";
+      await logLeadSafely(convo, { phone: from, source, packageInterest: packageName, status: "مهتم بعرض" });
+      await sendWhatsAppText(from, replies.BOOKING_START, phoneNumberId);
+      return;
+    }
+    // Not a bare number reply - fall through to normal handling below.
+  }
+
   // 2) List selection.
   if (type === "list_reply") {
     if (listId === "MENU_BOOK") {
@@ -504,6 +528,9 @@ async function handleWhatsAppEvent(event) {
     const canned = replies[listId];
     if (canned) {
       await sendWhatsAppText(from, canned, phoneNumberId);
+      if (listId === "MENU_OFFER") {
+        convo.awaitingPackageChoice = true;
+      }
       await logLeadSafely(convo, {
         phone: from,
         source,
