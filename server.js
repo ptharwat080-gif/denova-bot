@@ -10,7 +10,7 @@
 require("dotenv").config();
 const express = require("express");
 
-const { getAiReply, extractBookingDetails } = require("./lib/claude");
+const { getAiReply, extractBookingDetails, getAdvisorSuggestion } = require("./lib/claude");
 const {
   sendMetaText,
   parseMetaWebhookEvents,
@@ -41,6 +41,12 @@ const WHATSAPP_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
 // (e.g. "201104677046"). When a customer asks for a human on ANY platform, we proactively alert
 // this number on WhatsApp with a summary, so the team can pick up the conversation with context.
 const CLINIC_STAFF_WHATSAPP_NUMBER = process.env.CLINIC_STAFF_WHATSAPP_NUMBER;
+
+// Staff advisor line: any WhatsApp message sent to the bot FROM this number is treated as a
+// request for a suggested reply (not a customer conversation) - staff paste in a real question
+// they got from a customer somewhere else, and get back a ready-to-copy reply written in the
+// clinic's exact voice. Never logged to the sheet, never enters the normal booking flow.
+const STAFF_ADVISOR_NUMBER = process.env.STAFF_ADVISOR_NUMBER || "201221874831";
 
 // Optional second WhatsApp number (e.g. the clinic's old general-contact number) registered
 // under the same WhatsApp Business Account as the primary bot number. If set, both numbers are
@@ -454,6 +460,23 @@ app.post("/webhook/whatsapp", async (req, res) => {
 
 async function handleWhatsAppEvent(event) {
   const { from, type, text, listId, name, phoneNumberId } = event;
+
+  // Staff advisor line - intercept BEFORE touching conversation state, sheet logging, or the
+  // normal customer flow at all. Any text from this number gets a suggested reply back, nothing
+  // else happens.
+  if (STAFF_ADVISOR_NUMBER && normalizePhone(from) === normalizePhone(STAFF_ADVISOR_NUMBER)) {
+    if (type === "text" && text) {
+      try {
+        const suggestion = await getAdvisorSuggestion(text);
+        await sendWhatsAppText(from, suggestion || "مقدرتش أطلع رد مناسب، ممكن توضح السؤال أكتر؟", phoneNumberId);
+      } catch (err) {
+        console.error("Advisor suggestion failed:", err.message);
+        await sendWhatsAppText(from, "حصل خطأ وأنا بجهز الرد، جرب تاني كمان شوية.", phoneNumberId).catch(() => {});
+      }
+    }
+    return;
+  }
+
   const convo = getConversation("whatsapp", from);
   const source = whatsappSourceLabel(phoneNumberId);
 
