@@ -42,11 +42,15 @@ const WHATSAPP_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
 // this number on WhatsApp with a summary, so the team can pick up the conversation with context.
 const CLINIC_STAFF_WHATSAPP_NUMBER = process.env.CLINIC_STAFF_WHATSAPP_NUMBER;
 
-// Staff advisor line: any WhatsApp message sent to the bot FROM this number is treated as a
-// request for a suggested reply (not a customer conversation) - staff paste in a real question
-// they got from a customer somewhere else, and get back a ready-to-copy reply written in the
-// clinic's exact voice. Never logged to the sheet, never enters the normal booking flow.
-const STAFF_ADVISOR_NUMBER = process.env.STAFF_ADVISOR_NUMBER || "201221874831";
+// Staff advisor line: any WhatsApp message sent to the bot FROM one of these numbers is treated
+// as a request for a suggested reply (not a customer conversation) - staff paste in a real
+// question they got from a customer somewhere else, and get back a ready-to-copy reply written
+// in the clinic's exact voice. Never logged to the sheet, never enters the normal booking flow.
+// Override with a comma-separated list via the STAFF_ADVISOR_NUMBERS env var if needed.
+const STAFF_ADVISOR_NUMBERS = (process.env.STAFF_ADVISOR_NUMBERS || "201221874831,201061228657")
+  .split(",")
+  .map((n) => n.trim())
+  .filter(Boolean);
 
 // Optional second WhatsApp number (e.g. the clinic's old general-contact number) registered
 // under the same WhatsApp Business Account as the primary bot number. If set, both numbers are
@@ -464,11 +468,14 @@ async function handleWhatsAppEvent(event) {
   // Staff advisor line - intercept BEFORE touching conversation state, sheet logging, or the
   // normal customer flow at all. Any text from this number gets a suggested reply back, nothing
   // else happens.
-  if (STAFF_ADVISOR_NUMBER && normalizePhone(from) === normalizePhone(STAFF_ADVISOR_NUMBER)) {
+  if (STAFF_ADVISOR_NUMBERS.some((n) => normalizePhone(from) === normalizePhone(n))) {
     if (type === "text" && text) {
       try {
         const suggestion = await getAdvisorSuggestion(text);
-        await sendWhatsAppText(from, suggestion || "مقدرتش أطلع رد مناسب، ممكن توضح السؤال أكتر؟", phoneNumberId);
+        const reply = suggestion
+          ? `💬 اقتراح الرد (انسخه وابعته للعميل):\n\n${suggestion}`
+          : "مقدرتش أطلع رد مناسب، ممكن توضح السؤال أكتر؟";
+        await sendWhatsAppText(from, reply, phoneNumberId);
       } catch (err) {
         console.error("Advisor suggestion failed:", err.message);
         await sendWhatsAppText(from, "حصل خطأ وأنا بجهز الرد، جرب تاني كمان شوية.", phoneNumberId).catch(() => {});
