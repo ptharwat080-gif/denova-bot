@@ -321,8 +321,8 @@ function handleMetaEcho(event) {
 // channel - no other code changes needed. While paused, the bot stays completely silent but
 // still logs the contact to the sheet, so no lead is lost while you're handling it manually.
 const PAUSED_PLATFORMS = {
-  messenger: true,
-  instagram: true,
+  messenger: false,
+  instagram: false,
 };
 
 async function handleMetaMessage(event) {
