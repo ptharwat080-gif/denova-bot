@@ -321,8 +321,9 @@ function handleMetaEcho(event) {
 // channel - no other code changes needed. While paused, the bot stays completely silent but
 // still logs the contact to the sheet, so no lead is lost while you're handling it manually.
 const PAUSED_PLATFORMS = {
-  messenger: false,
-  instagram: false,
+  messenger: true,
+  instagram: true,
+  whatsapp: true,
 };
 
 async function handleMetaMessage(event) {
@@ -492,6 +493,22 @@ async function handleWhatsAppEvent(event) {
   if (phoneNumberId) convo.phoneNumberId = phoneNumberId;
 
   if (convo.escalated) return; // human has taken over
+
+  // Temporary full pause switch (see PAUSED_PLATFORMS above) - stays completely silent on
+  // WhatsApp too, but still logs the first contact to the sheet so no lead is lost while
+  // you're handling things manually. Set PAUSED_PLATFORMS.whatsapp back to false to resume.
+  if (PAUSED_PLATFORMS.whatsapp) {
+    if (!convo.sheetRow && type === "text") {
+      await logLeadSafely(convo, {
+        name,
+        phone: from,
+        source,
+        status: "عميل جديد",
+        notes: `أول رسالة (الشات موقّف مؤقتًا): ${text || ""}`,
+      });
+    }
+    return;
+  }
 
   // Job/vacancy inquiries (including a doctor asking about work) are not patient leads -
   // go completely silent on this conversation instead of replying like a normal customer.
